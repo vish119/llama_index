@@ -1,6 +1,15 @@
+import asyncio
+import json
+import logging
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 from llama_index.core.agent.workflow.base_agent import BaseWorkflowAgent
+from llama_index.core.agent.workflow.guardrails import (
+    check_for_unnecessary_tools,
+    check_for_missing_tools,
+    check_for_incorrect_arguments,
+)
 from llama_index.core.agent.workflow.workflow_events import (
     AgentInput,
     AgentOutput,
@@ -13,6 +22,10 @@ from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import BaseMemory
 from llama_index.core.tools import AsyncBaseTool
 from llama_index.core.workflow import Context
+
+# Load retry feedback template
+with (Path(__file__).parent / "templates" / "retry_feedback.txt").open("r") as f:
+    RETRY_FEEDBACK_TEMPLATE = f.read()
 
 
 class FunctionAgent(BaseWorkflowAgent):
@@ -97,6 +110,212 @@ class FunctionAgent(BaseWorkflowAgent):
 
         return last_chat_response
 
+    async def _validate_and_retry_with_guardrail(
+        self,
+        ctx: Context,
+        current_llm_input: List[ChatMessage],
+        last_chat_response: ChatResponse,
+        tool_calls: List,
+        tools: Sequence[AsyncBaseTool],
+        scratchpad: List[ChatMessage],
+    ) -> tuple[Optional[ChatResponse], Optional[List]]:
+        """
+        Validate tool calls and retry if unnecessary tools are detected.
+
+        Args:
+            ctx: Workflow context
+            current_llm_input: Current conversation history
+            last_chat_response: The LLM's response
+            tool_calls: Extracted tool calls from response
+            tools: Available tools
+            scratchpad: Current scratchpad messages
+
+        Returns:
+            Tuple of (response, tool_calls):
+                - response: Either the corrected response (if retry) or original response
+                - tool_calls: Either the corrected tool calls (if retry) or original tool calls
+        """
+        logger = logging.getLogger(__name__)
+
+        # Initialize with original values
+        current_response = last_chat_response
+        current_tool_calls = tool_calls
+        retry_input = current_llm_input
+
+
+        logger.info(f"Guardrails: Validating {len(tool_calls)} tool call(s) with all guardrails")
+
+        # Allow up to 2 retries
+        MAX_RETRIES = 2
+
+        for retry_attempt in range(MAX_RETRIES):
+            try:
+                # Extract text response if available
+                predicted_response = None
+                if hasattr(self.llm, 'get_response_text') and current_response:
+                    predicted_response = self.llm.get_response_text(current_response)
+
+                # Run all 3 guardrails in parallel
+                logger.info(f"Running all guardrails in parallel on attempt {retry_attempt + 1}")
+
+                (
+                    (no_unnecessary_tools, unnecessary_tools_feedback),
+                    (no_missing_tools, missing_tools_feedback),
+                    (no_incorrect_arguments, incorrect_arguments_feedback),
+                ) = await asyncio.gather(
+                    check_for_unnecessary_tools(
+                        llm=self.llm,
+                        tool_calls=current_tool_calls,
+                        conversation_history=retry_input,
+                        available_tools=tools,
+                    ),
+                    check_for_missing_tools(
+                        llm=self.llm,
+                        tool_calls=current_tool_calls,
+                        conversation_history=retry_input,
+                        available_tools=tools,
+                        predicted_response=predicted_response,
+                    ),
+                    check_for_incorrect_arguments(
+                        llm=self.llm,
+                        tool_calls=current_tool_calls,
+                        conversation_history=retry_input,
+                        available_tools=tools,
+                    ),
+                )
+
+                # Check if all guardrails passed
+                if no_unnecessary_tools and no_missing_tools and no_incorrect_arguments:
+                    logger.info(f"Guardrails: All validations passed on attempt {retry_attempt + 1}")
+                    break
+
+                # Collect all feedback from failed guardrails in logical order
+                all_feedback = []
+
+                # 1. First, show unnecessary tools (should be removed)
+                if unnecessary_tools_feedback is not None:
+                    unnecessary_issues = unnecessary_tools_feedback.get("issues", [])
+                    if unnecessary_issues:
+                        logger.info(f"Guardrail 1: Found {len(unnecessary_issues)} unnecessary tool(s)")
+                        all_feedback.append("UNNECESSARY TOOLS (should be removed):")
+                        for issue in unnecessary_issues:
+                            all_feedback.append(f"  - {issue}")
+                        all_feedback.append("")  # Empty line
+
+                # 2. Then, show incorrect arguments for remaining tools (should be fixed)
+                if incorrect_arguments_feedback is not None:
+                    argument_issues = incorrect_arguments_feedback.get("issues", [])
+                    if argument_issues:
+                        logger.info(f"Guardrail 3: Found {len(argument_issues)} tool(s) with incorrect arguments")
+                        all_feedback.append("INCORRECT ARGUMENTS (fix arguments for these tools):")
+                        for issue in argument_issues:
+                            all_feedback.append(f"  - {issue}")
+                        all_feedback.append("")  # Empty line
+
+                # 3. Finally, show missing tools (should be added)
+                if missing_tools_feedback is not None:
+                    missing_issues = missing_tools_feedback.get("issues", [])
+                    if missing_issues:
+                        logger.info(f"Guardrail 2: Found {len(missing_issues)} missing tool(s)")
+                        all_feedback.append("MISSING TOOLS (should be added):")
+                        for issue in missing_issues:
+                            all_feedback.append(f"  - {issue}")
+                        all_feedback.append("")  # Empty line
+
+                logger.info(
+                    f"Guardrails: Retry attempt {retry_attempt + 1}/{MAX_RETRIES} - "
+                    f"found issues"
+                )
+
+                # Construct feedback content (without IMPORTANT note - that's in template)
+                feedback_content = "\n".join(all_feedback)
+
+                # Extract agent's predicted response text
+                predicted_response_text = ""
+                if hasattr(self.llm, 'get_response_text') and current_response:
+                    predicted_response_text = self.llm.get_response_text(current_response)
+
+                # Format predicted response section
+                predicted_response_section = ""
+                if predicted_response_text:
+                    predicted_response_section = f"YOUR RESPONSE:\n{predicted_response_text}\n"
+
+                # Format predicted tool calls section with full arguments
+                predicted_tools_section = ""
+                if current_tool_calls:
+                    tool_calls_formatted = []
+                    for tc in current_tool_calls:
+                        args_str = json.dumps(tc.tool_kwargs, indent=2)
+                        tool_calls_formatted.append(f"  • {tc.tool_name}(\n{args_str}\n  )")
+
+                    predicted_tools_section = "YOUR TOOL CALLS:\n" + "\n".join(tool_calls_formatted)
+
+                # Format complete feedback message using template
+                feedback_content_formatted = RETRY_FEEDBACK_TEMPLATE.format(
+                    predicted_response_section=predicted_response_section,
+                    predicted_tools_section=predicted_tools_section,
+                    feedback=feedback_content
+                )
+
+                # Create single user message with complete context
+                combined_feedback_message = ChatMessage(
+                    role="user",
+                    content=feedback_content_formatted
+                )
+
+                # Add combined feedback to input (single user turn with all context)
+                retry_input = [*retry_input, combined_feedback_message]
+                ctx.write_event_to_stream(
+                    AgentInput(input=retry_input, current_agent_name=self.name)
+                )
+                try:
+                    # Retry
+                    if self.streaming:
+                        retry_response = await self._get_streaming_response(
+                            ctx, retry_input, tools
+                        )
+                    else:
+                        retry_response = await self._get_response(retry_input, tools)
+
+                    # Extract new tool calls from retry
+                    retry_tool_calls = self.llm.get_tool_calls_from_response(
+                        retry_response, error_on_no_tool_call=False
+                    )
+
+                    logger.info(
+                        f"Guardrails: Retry {retry_attempt + 1} successful, got {len(retry_tool_calls) if retry_tool_calls else 0} new tool call(s)"
+                    )
+
+                    # Update for next iteration
+                    current_response = retry_response
+                    current_tool_calls = retry_tool_calls
+
+                    # If no tool calls after retry, accept this outcome and exit
+                    if not retry_tool_calls:
+                        logger.info(
+                            f"Guardrails: Retry {retry_attempt + 1} resulted in no tool calls, "
+                            f"accepting this outcome"
+                        )
+                        break
+
+                except Exception as retry_error:
+                    logger.error(
+                        f"Guardrails: Retry {retry_attempt + 1} failed with error: {str(retry_error)}, "
+                        f"proceeding with original prediction"
+                    )
+                    break
+
+            except Exception as validation_error:
+                # Unexpected error in validation - fail open
+                logger.error(
+                    f"Guardrails: Unexpected validation error on attempt {retry_attempt + 1}: {str(validation_error)}, "
+                    f"proceeding with original prediction"
+                )
+                break
+
+        # Always return current state (either original or corrected after retries)
+        return current_response, current_tool_calls
+
     async def take_step(
         self,
         ctx: Context,
@@ -107,6 +326,9 @@ class FunctionAgent(BaseWorkflowAgent):
         """Take a single step with the function calling agent."""
         if not self.llm.metadata.is_function_calling_model:
             raise ValueError("LLM must be a FunctionCallingLLM")
+
+        # Flag to enable/disable guardrails - set to False to skip validation
+        enable_guardrails =  True
 
         scratchpad: List[ChatMessage] = await ctx.store.get(
             self.scratchpad_key, default=[]
@@ -128,18 +350,35 @@ class FunctionAgent(BaseWorkflowAgent):
             last_chat_response, error_on_no_tool_call=False
         )
 
-        # only add to scratchpad if we didn't select the handoff tool
-        scratchpad.append(last_chat_response.message)
+        # Run guardrails if enabled
+        if enable_guardrails:
+            # Run all guardrails: unnecessary tools, missing tools, incorrect arguments
+            final_response, final_tool_calls = await self._validate_and_retry_with_guardrail(
+                ctx=ctx,
+                current_llm_input=current_llm_input,
+                last_chat_response=last_chat_response,
+                tool_calls=tool_calls,
+                tools=tools,
+                scratchpad=scratchpad,
+            )
+        else:
+            # Skip guardrails - use original response
+            final_response = last_chat_response
+            final_tool_calls = tool_calls
+
+        # Add final response to scratchpad (either original or corrected)
+        scratchpad.append(final_response.message)
         await ctx.store.set(self.scratchpad_key, scratchpad)
 
+        # Return agent output with final response
         raw = (
-            last_chat_response.raw.model_dump()
-            if isinstance(last_chat_response.raw, BaseModel)
-            else last_chat_response.raw
+            final_response.raw.model_dump()
+            if isinstance(final_response.raw, BaseModel)
+            else final_response.raw
         )
         return AgentOutput(
-            response=last_chat_response.message,
-            tool_calls=tool_calls or [],
+            response=final_response.message,
+            tool_calls=final_tool_calls or [],
             raw=raw,
             current_agent_name=self.name,
         )

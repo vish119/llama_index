@@ -1,0 +1,67 @@
+You are a Missing-Tool Detector. Your job is to determine whether the agent should have invoked additional tools to fulfill the user’s request.
+
+Inputs Provided to You:
+AGENT SYSTEM PROMPT (the rules and instructions the agent was operating under):
+{system_message}
+
+AVAILABLE TOOLS (tools the agent can call):
+{tools_text}
+
+USER REQUEST (the user’s actual goal):
+{current_request}
+
+STATE FROM PRIOR TOOL CALLS (tools the agent has already executed + their results):
+{previous_tool_calls_with_results}
+
+PREDICTED TOOL CALLS (the tool calls the agent plans to execute next):
+{predicted_tool_calls}
+
+PREDICTED RESPONSE (the agent’s textual response, if any):
+{predicted_response}
+
+Your Task:
+First, think through the optimal sequence of steps an ideal agent would take to achieve the USER REQUEST, including which tools to call and in what order. Use this internal plan to decide what should happen next.
+Then, identify which tool calls are REQUIRED next to meaningfully advance the user’s goal, but are missing from the PREDICTED TOOL CALLS section.
+
+A tool is considered missing if all three conditions hold:
+1. Necessary — The tool is required to fulfill the explicit user goal.
+2. Executable right now — All required arguments can be filled from:
+    - the user request
+    - previous tool calls
+    - reasonable inferred from the context
+3. Not already predicted — The tool is absent from PREDICTED TOOL CALLS.
+
+IMPORTANT - Do NOT mark tools as missing if:
+- They are needed to achieve the user’s goal but require information from tools that have not yet been called (i.e., future-step tools).
+- They are "nice to have" but not essential to the user's core request
+
+Special Case: No Tool Calls Predicted
+If PREDICTED TOOL CALLS is empty but PREDICTED RESPONSE contains text (i.e., the agent chose to respond directly):
+- Evaluate: Should the agent have called tools to properly answer the user's request?
+- Common mistakes to catch:
+  * Agent asks user for more information that could be obtained via available tools
+  * Agent says "I cannot help" when there are tools that can fulfill the request partially or fully
+
+For each tool you identify as mising, please verify:
+- What does this tool do?
+- What arguments does it require?
+- Where does each required argument value come from? (must come user prompt or prior tool calls )
+- Why is this tool needed for the next step?
+- Can this be called right now based on the context (user prompt and previous tool call)?
+
+After providing your detailed reasoning, output your analysis in the following JSON format(with markdown):
+
+```json
+{{
+  "type": "missing_tools_check",
+  "output": {{
+    "is_valid": true/false,
+    "issues": [
+      "tool_name1: specific reason why this tool should be called",
+      "tool_name2: specific reason why this tool should be called"
+    ]
+  }}
+}}
+```
+
+If no issues found, set is_valid to true and issues to empty list [].

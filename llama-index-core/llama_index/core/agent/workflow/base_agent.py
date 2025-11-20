@@ -612,6 +612,7 @@ class BaseWorkflowAgent(
         start_event: Optional[AgentWorkflowStartEvent] = None,
         **kwargs: Any,
     ) -> WorkflowHandler:
+
         # Detect if hitl is needed
         if ctx is not None and ctx.is_running:
             return super().run(

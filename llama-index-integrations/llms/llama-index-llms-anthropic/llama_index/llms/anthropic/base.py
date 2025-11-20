@@ -925,3 +925,22 @@ class Anthropic(FunctionCallingLLM):
             )
 
         return tool_selections
+
+    def get_response_text(
+        self,
+        response: "ChatResponse",
+    ) -> str:
+        """Extract text response from ChatResponse.
+
+        Args:
+            response: The ChatResponse to extract text from
+
+        Returns:
+            The extracted text content, or empty string if no text blocks found
+        """
+        text_blocks = [
+            block.text
+            for block in response.message.blocks
+            if isinstance(block, LITextBlock)
+        ]
+        return " ".join(text_blocks) if text_blocks else ""

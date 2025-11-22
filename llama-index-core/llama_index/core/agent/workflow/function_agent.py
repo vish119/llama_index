@@ -40,6 +40,10 @@ class FunctionAgent(BaseWorkflowAgent):
         default=True,
         description="If True, the agent will call multiple tools in parallel. If False, the agent will call tools sequentially.",
     )
+    guardrail_prompt_version: str = Field(
+        default="v2",
+        description="Version of guardrail prompts to use (v1, v2, etc.)",
+    )
 
     async def _get_response(
         self, current_llm_input: List[ChatMessage], tools: Sequence[AsyncBaseTool]
@@ -142,7 +146,7 @@ class FunctionAgent(BaseWorkflowAgent):
         current_tool_calls = tool_calls
         retry_input = current_llm_input
 
-        logger.info(f"####### NEW STEP BEGINS HERE#####")
+        logger.info(f"#######  STEP BEGINS HERE#####")
 
         # Log context: user request and previous tool calls
         logger.info("=== CONTEXT ===")
@@ -196,6 +200,9 @@ class FunctionAgent(BaseWorkflowAgent):
         # Allow up to 2 retries
         MAX_RETRIES = 2
 
+        # Track retry history for contextual guardrail feedback
+        retry_history = []
+
         for retry_attempt in range(MAX_RETRIES):
             try:
                 # Extract text response if available
@@ -216,6 +223,8 @@ class FunctionAgent(BaseWorkflowAgent):
                         tool_calls=current_tool_calls,
                         conversation_history=retry_input,
                         available_tools=tools,
+                        template_version=self.guardrail_prompt_version,
+                        retry_history=retry_history,
                     ),
                     check_for_missing_tools(
                         llm=self.llm,
@@ -223,6 +232,8 @@ class FunctionAgent(BaseWorkflowAgent):
                         conversation_history=retry_input,
                         available_tools=tools,
                         predicted_response=predicted_response,
+                        template_version=self.guardrail_prompt_version,
+                        retry_history=retry_history,
                     ),
                     check_for_incorrect_arguments(
                         llm=self.llm,
@@ -289,27 +300,33 @@ class FunctionAgent(BaseWorkflowAgent):
                 if hasattr(self.llm, 'get_response_text') and current_response:
                     predicted_response_text = self.llm.get_response_text(current_response)
 
-                # Format predicted response section
-                predicted_response_section = ""
-                if predicted_response_text:
-                    predicted_response_section = f"YOUR RESPONSE:\n{predicted_response_text}\n"
-
-                # Format predicted tool calls section with full arguments
-                predicted_tools_section = ""
+                # Format predicted tool calls (just the list, no header)
+                predicted_tools = ""
                 if current_tool_calls:
                     tool_calls_formatted = []
                     for tc in current_tool_calls:
                         args_str = json.dumps(tc.tool_kwargs, indent=2)
                         tool_calls_formatted.append(f"  • {tc.tool_name}(\n{args_str}\n  )")
-
-                    predicted_tools_section = "YOUR TOOL CALLS:\n" + "\n".join(tool_calls_formatted)
+                    predicted_tools = "\n".join(tool_calls_formatted)
 
                 # Format complete feedback message using template
                 feedback_content_formatted = RETRY_FEEDBACK_TEMPLATE.format(
-                    predicted_response_section=predicted_response_section,
-                    predicted_tools_section=predicted_tools_section,
+                    predicted_response_text=predicted_response_text,
+                    predicted_tools=predicted_tools,
                     feedback=feedback_content
                 )
+
+                # Track this attempt in retry history for contextual guardrail feedback
+                retry_history.append({
+                    "attempt": retry_attempt + 1,
+                    "predicted_tools": [{"name": tc.tool_name, "arguments": tc.tool_kwargs} for tc in current_tool_calls],
+                    "predicted_response": predicted_response_text,
+                    "guardrail_feedback": {
+                        "Guardrail 1 (Unnecessary Tools)": unnecessary_tools_feedback.get("issues", []) if unnecessary_tools_feedback else [],
+                        "Guardrail 2 (Missing Tools)": missing_tools_feedback.get("issues", []) if missing_tools_feedback else [],
+                        "Guardrail 3 (Incorrect Arguments)": incorrect_arguments_feedback.get("issues", []) if incorrect_arguments_feedback else [],
+                    }
+                })
 
                 # Create single user message with complete context
                 combined_feedback_message = ChatMessage(

@@ -1,11 +1,12 @@
-Your previous prediction did not pass validation. Here's what you predicted:
+Your prediction was evaluated by guardrails (automated validation checks) and requires revision.
 
-{predicted_response_section}
-{predicted_tools_section}
+PREDICTED RESPONSE (can be empty):
+{predicted_response_text}
 
-VALIDATION FEEDBACK:
+PREDICTED TOOL CALLS (can be empty):
+{predicted_tools}
+
+GUARDRAIL FEEDBACK:
 {feedback}
-
-Please revise your prediction to address the feedback above.
 
 IMPORTANT: Use this feedback as additional context to guide your next action. If no tool calls are needed based on this feedback, provide your response naturally without mentioning this feedback or any 'corrected predictions'. Act as if this guidance was part of your original context and respond directly to the user's request.

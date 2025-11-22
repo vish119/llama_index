@@ -11,9 +11,79 @@ from llama_index.core.llms import ChatMessage, LLM
 from llama_index.core.tools import AsyncBaseTool
 
 
-# Load unnecessary tools validation template
-with (Path(__file__).parent / "templates" / "unnecessary_tools_validation.txt").open("r") as f:
-    UNNECESSARY_TOOLS_TEMPLATE = f.read()
+# Template filename constants
+UNNECESSARY_TOOLS_TEMPLATE_NAME = "unnecessary_tools_validation"
+MISSING_TOOLS_TEMPLATE_NAME = "missing_tools_validation"
+INCORRECT_ARGUMENTS_TEMPLATE_NAME = "incorrect_arguments_validation"
+
+
+def _load_template(template_name: str, version: str = "v2") -> str:
+    """Load a guardrail template with version support.
+
+    Args:
+        template_name: Name of template (e.g., 'unnecessary_tools_validation')
+        version: Template version ('v1', 'v2', etc.). Defaults to 'v2'.
+
+    Returns:
+        Template content as string
+    """
+    # Try versioned template first (in v1/, v2/, etc. subdirectories)
+    template_path = Path(__file__).parent / "templates" / version / f"{template_name}.txt"
+
+    # Fallback to non-versioned template if version doesn't exist
+    if not template_path.exists():
+        template_path = Path(__file__).parent / "templates" / f"{template_name}.txt"
+
+    with template_path.open("r") as f:
+        return f.read()
+
+
+def _format_retry_history(retry_history: Optional[List[Dict[str, Any]]]) -> str:
+    """Format retry history for display in validation prompts.
+
+    Args:
+        retry_history: List of previous retry attempts with predictions and feedback
+
+    Returns:
+        Formatted string showing retry history, or message if no history
+    """
+    if not retry_history:
+        return "(No previous retry attempts)"
+
+    formatted_lines = []
+    for entry in retry_history:
+        attempt_num = entry.get("attempt", 0)
+        predicted_tools = entry.get("predicted_tools", [])
+        predicted_response = entry.get("predicted_response", "")
+        feedback = entry.get("guardrail_feedback", {})
+
+        formatted_lines.append(f"Attempt {attempt_num}:")
+
+        # Show what was predicted
+        if predicted_tools:
+            formatted_lines.append(f"  Predicted Tools:")
+            for tool_entry in predicted_tools:
+                if isinstance(tool_entry, dict):
+                    tool_name = tool_entry.get("name", "unknown")
+                    tool_args = tool_entry.get("arguments", {})
+                    args_str = json.dumps(tool_args) if tool_args else "{}"
+                    formatted_lines.append(f"    - {tool_name}({args_str})")
+                else:
+                    # Fallback for string format
+                    formatted_lines.append(f"    - {tool_entry}")
+        if predicted_response:
+            formatted_lines.append(f"  Predicted Response: {predicted_response}")
+
+        # Show feedback from each guardrail
+        for guardrail_name, issues in feedback.items():
+            if issues:
+                formatted_lines.append(f"  {guardrail_name}:")
+                for issue in issues:
+                    formatted_lines.append(f"    - {issue}")
+
+        formatted_lines.append("")  # Empty line between attempts
+
+    return "\n".join(formatted_lines)
 
 
 def _format_conversation_context(
@@ -150,6 +220,8 @@ async def check_for_unnecessary_tools(
     tool_calls: List[Any],
     conversation_history: List[ChatMessage],
     available_tools: Sequence[AsyncBaseTool],
+    template_version: str = "v2",
+    retry_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     Guardrail 1: Check for unnecessary tools in the prediction.
@@ -162,6 +234,8 @@ async def check_for_unnecessary_tools(
         tool_calls: List of tool calls predicted by the agent
         conversation_history: Full conversation history including tool results
         available_tools: Tools available to the agent
+        template_version: Template version to use ('v1', 'v2', etc.). Defaults to 'v2'.
+        retry_history: History of previous retry attempts with predictions and feedback
 
     Returns:
         Tuple of (is_valid, feedback)
@@ -208,12 +282,19 @@ async def check_for_unnecessary_tools(
             predicted_tool_names.append(tool_name)
     predicted_tool_calls = ", ".join(predicted_tool_names)
 
+    # Load template with specified version
+    template = _load_template(UNNECESSARY_TOOLS_TEMPLATE_NAME, template_version)
+
+    # Format retry history
+    retry_history_text = _format_retry_history(retry_history)
+
     # Construct validation prompt from template
-    validation_prompt = UNNECESSARY_TOOLS_TEMPLATE.format(
+    validation_prompt = template.format(
         system_message=context["system_message"],
         tools_text=tools_text,
         current_request=context["current_request"],
         previous_tool_calls_with_results=previous_tool_calls_with_results,
+        retry_history=retry_history_text,
         predicted_tool_calls=predicted_tool_calls
     )
 
@@ -247,17 +328,14 @@ async def check_for_unnecessary_tools(
         return True, None
 
 
-# Load missing tools validation template
-with (Path(__file__).parent / "templates" / "missing_tools_validation.txt").open("r") as f:
-    MISSING_TOOLS_TEMPLATE = f.read()
-
-
 async def check_for_missing_tools(
     llm: LLM,
     tool_calls: List[Any],
     conversation_history: List[ChatMessage],
     available_tools: Sequence[AsyncBaseTool],
     predicted_response: Optional[str] = None,
+    template_version: str = "v2",
+    retry_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     Guardrail 2: Check for missing tools that should be in the prediction.
@@ -271,6 +349,8 @@ async def check_for_missing_tools(
         conversation_history: Full conversation history including tool results
         available_tools: Tools available to the agent
         predicted_response: The text response predicted by the agent (if any)
+        template_version: Template version to use ('v1', 'v2', etc.). Defaults to 'v2'.
+        retry_history: History of previous retry attempts with predictions and feedback
 
     Returns:
         Tuple of (is_valid, feedback)
@@ -313,12 +393,19 @@ async def check_for_missing_tools(
             predicted_tool_names.append(tool_name)
     predicted_tool_calls = ", ".join(predicted_tool_names)
 
+    # Load template with specified version
+    template = _load_template(MISSING_TOOLS_TEMPLATE_NAME, template_version)
+
+    # Format retry history
+    retry_history_text = _format_retry_history(retry_history)
+
     # Construct validation prompt
-    validation_prompt = MISSING_TOOLS_TEMPLATE.format(
+    validation_prompt = template.format(
         system_message=context["system_message"],
         tools_text=tools_text,
         current_request=context["current_request"],
         previous_tool_calls_with_results=previous_tool_calls_with_results,
+        retry_history=retry_history_text,
         predicted_tool_calls=predicted_tool_calls,
         predicted_response=predicted_response or "(No text response predicted)"
     )
@@ -353,16 +440,12 @@ async def check_for_missing_tools(
         return True, None
 
 
-# Load incorrect arguments validation template
-with (Path(__file__).parent / "templates" / "incorrect_arguments_validation.txt").open("r") as f:
-    INCORRECT_ARGUMENTS_TEMPLATE = f.read()
-
-
 async def check_for_incorrect_arguments(
     llm: LLM,
     tool_calls: List[Any],
     conversation_history: List[ChatMessage],
     available_tools: Sequence[AsyncBaseTool],
+    template_version: str = "v2",
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     Guardrail 3: Check for incorrect arguments in tool calls.
@@ -374,6 +457,7 @@ async def check_for_incorrect_arguments(
         tool_calls: List of tool calls predicted by the agent
         conversation_history: Full conversation history including tool results
         available_tools: Tools available to the agent
+        template_version: Template version to use ('v1', 'v2', etc.). Defaults to 'v2'.
 
     Returns:
         Tuple of (is_valid, feedback)
@@ -407,6 +491,9 @@ async def check_for_incorrect_arguments(
     else:
         previous_tool_calls_with_results = "(No tools executed yet)"
 
+    # Load template with specified version
+    template = _load_template(INCORRECT_ARGUMENTS_TEMPLATE_NAME, template_version)
+
     # Define inner async function to validate a single tool call
     async def validate_single_call(tool_name: str, idx: int, tool_kwargs: Dict[str, Any], calls_count: int) -> Tuple[str, Optional[List[str]]]:
         """
@@ -424,7 +511,7 @@ async def check_for_incorrect_arguments(
         tool_call_with_args = f"{tool_name}({json.dumps(tool_kwargs)})"
 
         # Build validation prompt for THIS tool only
-        validation_prompt = INCORRECT_ARGUMENTS_TEMPLATE.format(
+        validation_prompt = template.format(
             system_message=system_message,
             tool_description=tool_description,
             current_request=current_request,

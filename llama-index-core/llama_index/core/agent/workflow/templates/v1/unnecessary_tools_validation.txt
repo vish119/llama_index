@@ -14,6 +14,9 @@ USER REQUEST (the user's actual goal):
 PREVIOUS TOOL CALLS AND RESULTS (state + all information already available to the agent):
 {previous_tool_calls_with_results}
 
+RETRY HISTORY (previous guardrail feedback and agent responses):
+{retry_history}
+
 PREDICTED TOOL CALLS (the tool calls the agent plans to execute next):
 {predicted_tool_calls}
 
@@ -30,7 +33,7 @@ A tool call should be REMOVED if ANY of the following are true:
 
 4. **Premature execution** — The tool has all required arguments available (from user request, previous tool calls, or can be reasonably inferred from the context) BUT should wait for prerequisite tools to complete first
 
-5. **No meaningful contribution** — The tool call does not move the agent closer to completing the user’s goal (e.g., it provides irrelevant data, performs an unnecessary action, or its output would not influence the final answer).
+5. **No meaningful contribution** — The tool call does not move the agent closer to completing the user's goal (e.g., it provides irrelevant data, performs an unnecessary action, or its output would not influence the final answer).
 
 Briefly explain for each flagged tool:
 - Why it should be removed

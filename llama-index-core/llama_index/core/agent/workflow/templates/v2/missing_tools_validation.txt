@@ -14,6 +14,9 @@ USER REQUEST (the user's actual goal):
 PREVIOUS TOOL CALLS AND RESULTS (state + all information already available to the agent):
 {previous_tool_calls_with_results}
 
+RETRY HISTORY (previous guardrail feedback and agent responses):
+{retry_history}
+
 PREDICTED TOOL CALLS (the tool calls the agent plans to execute next):
 {predicted_tool_calls}
 
@@ -30,13 +33,28 @@ A tool is considered missing if ALL three conditions hold:
 1. **Necessary** — Required to fulfill the user's explicit goal (not just "nice to have")
 
 2. **Executable now** — Can be called in the next step because:
-   - All required arguments are available (from user request, previous tool calls, or can be
+   - All required arguments are available (from user request, PREVIOUS TOOL CALLS, or can be
      reasonably inferred from the context)
-   - No unmet dependencies: Even if all arguments are available, if this tool logically depends on
-     another tool's outcome to inform whether or how it should execute, that prerequisite tool
-     must be in PREVIOUS TOOL CALLS
+   - Does not depend on tools in PREDICTED TOOL CALLS (these are planned for the current step
+     but NOT YET EXECUTED, so their results are not yet part of the state)
+   - If this tool depends on another tool's outcome, that prerequisite must be in
+     PREVIOUS TOOL CALLS (already executed and results available)
 
 3. **Not predicted** — Absent from PREDICTED TOOL CALLS
+
+IMPORTANT EXCEPTIONS - Do NOT flag tools as missing in these cases:
+
+EXCEPTION 1 - Agent Making Valid Inferences:
+Do NOT mark a tool as "missing" if the agent is making reasonable inferences from available context, the agent has sufficient implicit information to proceed, or calling the tool would only confirm what's already reasonably certain. Trust the agent's judgment when inferences are contextually appropriate.
+
+EXCEPTION 2 - Coordination Check:
+Before marking a tool as missing, consider: Would this tool be flagged as "unnecessary" or "premature" by other validation logic? Is this tool something the agent might reasonably choose NOT to call? Is the missing tool truly required, or just "nice to have"? Only mark tools as missing if they are ABSOLUTELY necessary AND the agent has no valid reason to omit them.
+
+CONSISTENCY REQUIREMENT:
+Maintain stable feedback across retry attempts. If you flagged a tool as "missing" in a previous retry, don't later flag it as "unnecessary" when the agent adds it unless the agent's prediction or context has materially changed. If feedback changes across retries, there must be a clear reason for the change based on how the agent's approach evolved.
+
+GUIDING PRINCIPLE:
+These guardrails exist to catch clear errors, not to micro-manage valid approaches. When in doubt, trust the agent's reasoning if it's plausible. Only flag issues that would clearly lead to incorrect results. Prefer false negatives (missing real issues) over false positives (blocking valid approaches). Remember: there are often multiple valid ways to achieve a goal.
 
 SPECIAL CASE - No Tool Calls Predicted:
 If PREDICTED TOOL CALLS is empty but PREDICTED RESPONSE has text, evaluate if the agent should

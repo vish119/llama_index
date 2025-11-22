@@ -142,8 +142,56 @@ class FunctionAgent(BaseWorkflowAgent):
         current_tool_calls = tool_calls
         retry_input = current_llm_input
 
+        logger.info(f"####### NEW STEP BEGINS HERE#####")
 
-        logger.info(f"Guardrails: Validating {len(tool_calls)} tool call(s) with all guardrails")
+        # Log context: user request and previous tool calls
+        logger.info("=== CONTEXT ===")
+
+        # Extract current user request (look for last user message before assistant predictions)
+        user_request = ""
+        for msg in reversed(current_llm_input):
+            if msg.role == "user":
+                user_request = msg.content or ""
+                break
+        if user_request:
+            logger.info(f"User request: {user_request}")
+
+        # Extract previous tool calls and results
+        # First, build mapping of tool_call_id -> tool_name from assistant messages
+        tool_id_to_name = {}
+        for msg in current_llm_input:
+            if msg.role == "assistant" and hasattr(msg, 'blocks') and msg.blocks:
+                for block in msg.blocks:
+                    if hasattr(block, 'tool_call_id') and hasattr(block, 'tool_name'):
+                        tool_id_to_name[block.tool_call_id] = block.tool_name
+
+        # Then extract tool results with proper names
+        previous_tools = []
+        for msg in current_llm_input:
+            if msg.role == "tool":
+                tool_id = msg.additional_kwargs.get('tool_call_id', 'unknown')
+                result = msg.content or ""
+                tool_name = tool_id_to_name.get(tool_id, "unknown")
+                previous_tools.append((tool_name, result))
+
+        if previous_tools:
+            logger.info(f"Previous tool calls: {len(previous_tools)}")
+            for tool_name, result in previous_tools:
+                result_preview = result[:100] + "..." if len(result) > 100 else result
+                logger.info(f"  - {tool_name} → {result_preview}")
+        else:
+            logger.info("Previous tool calls: None")
+
+        # Log initial agent prediction (before any retries)
+        logger.info("=== AGENT PREDICTION ===")
+        logger.info(f"Tool calls: {len(tool_calls)}")
+        for tc in tool_calls:
+            logger.info(f"  - {tc.tool_name}({tc.tool_kwargs})")
+        initial_predicted_response = None
+        if hasattr(self.llm, 'get_response_text') and last_chat_response:
+            initial_predicted_response = self.llm.get_response_text(last_chat_response)
+            if initial_predicted_response:
+                logger.info(f"Response text: {initial_predicted_response}")
 
         # Allow up to 2 retries
         MAX_RETRIES = 2
@@ -186,7 +234,7 @@ class FunctionAgent(BaseWorkflowAgent):
 
                 # Check if all guardrails passed
                 if no_unnecessary_tools and no_missing_tools and no_incorrect_arguments:
-                    logger.info(f"Guardrails: All validations passed on attempt {retry_attempt + 1}")
+                    logger.info(f"Guardrails: All validations passed on attempt {retry_attempt + 1}\n\n")
                     break
 
                 # Collect all feedback from failed guardrails in logical order
@@ -197,6 +245,8 @@ class FunctionAgent(BaseWorkflowAgent):
                     unnecessary_issues = unnecessary_tools_feedback.get("issues", [])
                     if unnecessary_issues:
                         logger.info(f"Guardrail 1: Found {len(unnecessary_issues)} unnecessary tool(s)")
+                        for issue in unnecessary_issues:
+                            logger.info(f"    {issue}")
                         all_feedback.append("UNNECESSARY TOOLS (should be removed):")
                         for issue in unnecessary_issues:
                             all_feedback.append(f"  - {issue}")
@@ -207,6 +257,8 @@ class FunctionAgent(BaseWorkflowAgent):
                     argument_issues = incorrect_arguments_feedback.get("issues", [])
                     if argument_issues:
                         logger.info(f"Guardrail 3: Found {len(argument_issues)} tool(s) with incorrect arguments")
+                        for issue in argument_issues:
+                            logger.info(f"    {issue}")
                         all_feedback.append("INCORRECT ARGUMENTS (fix arguments for these tools):")
                         for issue in argument_issues:
                             all_feedback.append(f"  - {issue}")
@@ -217,6 +269,8 @@ class FunctionAgent(BaseWorkflowAgent):
                     missing_issues = missing_tools_feedback.get("issues", [])
                     if missing_issues:
                         logger.info(f"Guardrail 2: Found {len(missing_issues)} missing tool(s)")
+                        for issue in missing_issues:
+                            logger.info(f"    {issue}")
                         all_feedback.append("MISSING TOOLS (should be added):")
                         for issue in missing_issues:
                             all_feedback.append(f"  - {issue}")
@@ -285,6 +339,17 @@ class FunctionAgent(BaseWorkflowAgent):
                     logger.info(
                         f"Guardrails: Retry {retry_attempt + 1} successful, got {len(retry_tool_calls) if retry_tool_calls else 0} new tool call(s)"
                     )
+
+                    # Log what changed after retry
+                    logger.info("=== AFTER RETRY ===")
+                    logger.info(f"Tool calls: {len(retry_tool_calls) if retry_tool_calls else 0}")
+                    if retry_tool_calls:
+                        for tc in retry_tool_calls:
+                            logger.info(f"  - {tc.tool_name}({tc.tool_kwargs})")
+                    if hasattr(self.llm, 'get_response_text') and retry_response:
+                        retry_response_text = self.llm.get_response_text(retry_response)
+                        if retry_response_text:
+                            logger.info(f"Response text: {retry_response_text}")
 
                     # Update for next iteration
                     current_response = retry_response

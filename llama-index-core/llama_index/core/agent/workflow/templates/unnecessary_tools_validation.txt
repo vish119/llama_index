@@ -1,4 +1,4 @@
-You are an Unnecessary-Tool Detector. Your job is to determine whether the agent is calling tools that are not needed to fulfill the user’s request.
+You are an Unnecessary/Wrong-Tool Detector. Your job is to determine whether the agent is calling tools that are not needed or incorrect for fulfilling the user's request.
 
 Inputs Provided to You:
 
@@ -8,7 +8,7 @@ AGENT SYSTEM PROMPT (the rules and instructions the agent was operating under):
 AVAILABLE TOOLS (tools the agent can call):
 {tools_text}
 
-USER REQUEST (the user’s actual goal):
+USER REQUEST (the user's actual goal):
 {current_request}
 
 PREVIOUS TOOL CALLS AND RESULTS (state + all information already available to the agent):
@@ -18,20 +18,25 @@ PREDICTED TOOL CALLS (the tool calls the agent plans to execute next):
 {predicted_tool_calls}
 
 Your Task:
-For each tool in PREDICTED TOOL CALLS, determine whether it is truly unnecessary.
+For each tool in PREDICTED TOOL CALLS, determine whether it should be removed.
 
-A tool call is UNNECESSARY if any of the following are true:
-1.Duplicate information — The tool retrieves information that is already fully available from PREVIOUS TOOL CALLS.
-(Exact same data, no new value added.)
-2. Irrelevant to the user’s goal — The tool does not help progress, support, or fulfill the USER REQUEST.
-3. Tool is redundant with another tool call in the prediction (same tool, same arguments)
+A tool call should be REMOVED if ANY of the following are true:
 
-For each tool, explicitly explain:
-- Is it necessary to achieve the user's goal? Why or why not?
-- If unnecessary, which specific reason(s) apply?
-- If necessary, what role does it play in fulfilling the request?
+1. **Duplicate information** — The tool retrieves information already fully available from PREVIOUS TOOL CALLS (exact same data, no new value added)
 
-After providing your detailed reasoning above, output your analysis in the following JSON format(with markdown):
+2. **Wrong tool** — The tool is incorrect for achieving the user's goal
+
+3. **Redundant in prediction** — Same tool with same arguments appears multiple times in PREDICTED TOOL CALLS
+
+4. **Premature execution** — The tool has all required arguments available (from user request, previous tool calls, or can be reasonably inferred from the context) BUT should wait for prerequisite tools to complete first
+
+5. **No meaningful contribution** — The tool call does not move the agent closer to completing the user’s goal (e.g., it provides irrelevant data, performs an unnecessary action, or its output would not influence the final answer).
+
+Briefly explain for each flagged tool:
+- Why it should be removed
+- Which specific reason applies
+
+Output your analysis in the following JSON format (with markdown):
 
 ```json
 {{
@@ -39,8 +44,8 @@ After providing your detailed reasoning above, output your analysis in the follo
   "output": {{
     "is_valid": true/false,
     "issues": [
-      "tool_name1: specific reason why this tool is not needed",
-      "tool_name2: specific reason why this tool is not needed"
+      "tool_name1: specific reason why this tool should be removed",
+      "tool_name2: specific reason why this tool should be removed"
     ]
   }}
 }}
